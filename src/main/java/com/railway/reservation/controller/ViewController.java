@@ -3,6 +3,13 @@ package com.railway.reservation.controller;
 import com.railway.reservation.repository.PassengerRepository;
 import com.railway.reservation.repository.ReservationRepository;
 import com.railway.reservation.repository.TrainRepository;
+import com.railway.reservation.exception.DuplicateTrainException;
+import com.railway.reservation.exception.InvalidTrainClassException;
+import com.railway.reservation.exception.InvalidInputException;
+import com.railway.reservation.exception.NoSeatsAvailableException;
+import com.railway.reservation.exception.ResourceNotFoundException;
+import com.railway.reservation.service.FareCalculator;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -12,6 +19,8 @@ import com.railway.reservation.entity.Passenger;
 import org.springframework.web.bind.annotation.PathVariable;
 import com.railway.reservation.entity.Reservation;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.servlet.mvc.support.RedirectAttributes;
+
 import java.util.List;
 
 @Controller
@@ -20,15 +29,18 @@ public class ViewController {
     private final TrainRepository trainRepository;
     private final PassengerRepository passengerRepository;
     private final ReservationRepository reservationRepository;
+    private final FareCalculator fareCalculator;
 
     public ViewController(
             TrainRepository trainRepository,
             PassengerRepository passengerRepository,
-            ReservationRepository reservationRepository) {
+            ReservationRepository reservationRepository,
+            FareCalculator fareCalculator) {
 
         this.trainRepository = trainRepository;
         this.passengerRepository = passengerRepository;
         this.reservationRepository = reservationRepository;
+        this.fareCalculator = fareCalculator;
     }
 
     @GetMapping("/")
@@ -93,15 +105,30 @@ public class ViewController {
 
     @PostMapping("/save-train")
     public String saveTrain(
-            Train train) {
+            Train train,
+            RedirectAttributes redirectAttributes) {
 
-        if(trainRepository.existsByTrainNumber(
-                train.getTrainNumber())){
+        try {
 
-            return "redirect:/trains-page";
+            validateTrain(train);
+
+            if(trainRepository.existsByTrainNumber(
+                    train.getTrainNumber())){
+
+                throw new DuplicateTrainException(
+                        train.getTrainNumber());
+            }
+
+            trainRepository.save(train);
+
+        } catch (DuplicateTrainException
+                 | InvalidInputException exception) {
+
+            redirectAttributes.addFlashAttribute(
+                    "error",
+                    exception.getMessage()
+            );
         }
-
-        trainRepository.save(train);
 
         return "redirect:/trains-page";
     }
@@ -124,9 +151,22 @@ public class ViewController {
 
     @PostMapping("/save-passenger")
     public String savePassenger(
-            Passenger passenger) {
+            Passenger passenger,
+            RedirectAttributes redirectAttributes) {
 
-        passengerRepository.save(passenger);
+        try {
+
+            validatePassenger(passenger);
+
+            passengerRepository.save(passenger);
+
+        } catch (InvalidInputException exception) {
+
+            redirectAttributes.addFlashAttribute(
+                    "error",
+                    exception.getMessage()
+            );
+        }
 
         return "redirect:/passengers-page";
     }
@@ -144,22 +184,38 @@ public class ViewController {
 
     @GetMapping("/cancel-reservation/{id}")
     public String cancelReservation(
-            @PathVariable Long id) {
+            @PathVariable Long id,
+            RedirectAttributes redirectAttributes) {
 
-        Reservation reservation =
-                reservationRepository
-                        .findById(id)
-                        .orElseThrow();
+        try {
 
-        Train train = reservation.getTrain();
+            Reservation reservation =
+                    reservationRepository
+                            .findById(id)
+                            .orElseThrow(
+                                    () -> new ResourceNotFoundException(
+                                            "Reservation",
+                                            id
+                                    )
+                            );
 
-        train.setAvailableSeats(
-                train.getAvailableSeats() + 1
-        );
+            Train train = reservation.getTrain();
 
-        trainRepository.save(train);
+            train.setAvailableSeats(
+                    train.getAvailableSeats() + 1
+            );
 
-        reservationRepository.delete(reservation);
+            trainRepository.save(train);
+
+            reservationRepository.delete(reservation);
+
+        } catch (ResourceNotFoundException exception) {
+
+            redirectAttributes.addFlashAttribute(
+                    "error",
+                    exception.getMessage()
+            );
+        }
 
         return "redirect:/reservations-page";
     }
@@ -218,93 +274,98 @@ public class ViewController {
             @RequestParam Long trainId,
             @RequestParam Long passengerId,
             @RequestParam String trainClass,
-            @RequestParam String journeyDate){
+            @RequestParam String journeyDate,
+            Model model){
 
-        Train train =
-                trainRepository.findById(trainId)
-                        .orElseThrow();
+        try {
 
-        Passenger passenger =
-                passengerRepository.findById(passengerId)
-                        .orElseThrow();
+            if (isBlank(journeyDate)) {
+                throw new InvalidInputException(
+                        "Journey date is required");
+            }
 
-        if(train.getAvailableSeats() <= 0){
-            throw new RuntimeException(
-                    "No Seats Available");
+            Train train =
+                    trainRepository.findById(trainId)
+                            .orElseThrow(
+                                    () -> new ResourceNotFoundException(
+                                            "Train",
+                                            trainId
+                                    )
+                            );
+
+            Passenger passenger =
+                    passengerRepository.findById(passengerId)
+                            .orElseThrow(
+                                    () -> new ResourceNotFoundException(
+                                            "Passenger",
+                                            passengerId
+                                    )
+                            );
+
+            if(train.getAvailableSeats() <= 0){
+                throw new NoSeatsAvailableException(trainId);
+            }
+
+            Reservation reservation =
+                    new Reservation();
+
+            String pnr =
+                    "PNR" + System.currentTimeMillis();
+
+            long count =
+                    reservationRepository.count();
+
+            String seatNo =
+                    "S1-" + String.format("%02d",
+                            count + 1);
+
+            double fare =
+                    fareCalculator.calculateFare(train, trainClass);
+
+            reservation.setPnr(pnr);
+
+            reservation.setTrainClass(
+                    trainClass);
+
+            reservation.setTicketPrice(
+                    fare);
+
+            reservation.setSeatNumber(
+                    seatNo);
+
+            reservation.setJourneyDate(
+                    journeyDate);
+
+            reservation.setStatus(
+                    "CONFIRMED");
+
+            reservation.setTrain(train);
+
+            reservation.setPassenger(
+                    passenger);
+
+            train.setAvailableSeats(
+                    train.getAvailableSeats()-1);
+
+            trainRepository.save(train);
+
+            reservationRepository.save(
+                    reservation);
+
+        } catch (InvalidInputException
+                 | InvalidTrainClassException
+                 | NoSeatsAvailableException
+                 | ResourceNotFoundException exception) {
+
+            addBookingData(model);
+
+            model.addAttribute(
+                    "error",
+                    exception.getMessage()
+            );
+
+            return "booking";
         }
-
-        Reservation reservation =
-                new Reservation();
-
-        String pnr =
-                "PNR" + System.currentTimeMillis();
-
-        long count =
-                reservationRepository.count();
-
-        String seatNo =
-                "S1-" + String.format("%02d",
-                        count + 1);
-
-        double fare = 0;
-
-        switch(trainClass){
-
-            case "GENERAL":
-                fare =
-                        train.getDistanceKm() * 0.5;
-                break;
-
-            case "SLEEPER":
-                fare =
-                        train.getDistanceKm() * 1;
-                break;
-
-            case "AC_3":
-                fare =
-                        train.getDistanceKm() * 2;
-                break;
-
-            case "AC_2":
-                fare =
-                        train.getDistanceKm() * 3;
-                break;
-
-            case "BUSINESS":
-                fare =
-                        train.getDistanceKm() * 5;
-                break;
-        }
-
-        reservation.setPnr(pnr);
-
-        reservation.setTrainClass(
-                trainClass);
-
-        reservation.setTicketPrice(
-                fare);
-
-        reservation.setSeatNumber(
-                seatNo);
-
-        reservation.setJourneyDate(
-                journeyDate);
-
-        reservation.setStatus(
-                "CONFIRMED");
-
-        reservation.setTrain(train);
-
-        reservation.setPassenger(
-                passenger);
-
-        train.setAvailableSeats(
-                train.getAvailableSeats()-1);
-
-        trainRepository.save(train);
-
-        reservationRepository.save(
-                reservation);
 
         return "redirect:/reservations-page";
     }
@@ -344,18 +405,70 @@ public class ViewController {
 
     @GetMapping("/delete-train/{id}")
     public String deleteTrain(
-            @PathVariable Long id) {
+            @PathVariable Long id,
+            RedirectAttributes redirectAttributes) {
 
-        trainRepository.deleteById(id);
+        try {
+
+            if(!trainRepository.existsById(id)){
+
+                throw new ResourceNotFoundException(
+                        "Train",
+                        id
+                );
+            }
+
+            trainRepository.deleteById(id);
+
+        } catch (ResourceNotFoundException exception) {
+
+            redirectAttributes.addFlashAttribute(
+                    "error",
+                    exception.getMessage()
+            );
+
+        } catch (DataIntegrityViolationException exception) {
+
+            redirectAttributes.addFlashAttribute(
+                    "error",
+                    "Train cannot be deleted because reservations exist"
+            );
+        }
 
         return "redirect:/trains-page";
     }
 
     @GetMapping("/delete-passenger/{id}")
     public String deletePassenger(
-            @PathVariable Long id) {
+            @PathVariable Long id,
+            RedirectAttributes redirectAttributes) {
 
-        passengerRepository.deleteById(id);
+        try {
+
+            if(!passengerRepository.existsById(id)){
+
+                throw new ResourceNotFoundException(
+                        "Passenger",
+                        id
+                );
+            }
+
+            passengerRepository.deleteById(id);
+
+        } catch (ResourceNotFoundException exception) {
+
+            redirectAttributes.addFlashAttribute(
+                    "error",
+                    exception.getMessage()
+            );
+
+        } catch (DataIntegrityViolationException exception) {
+
+            redirectAttributes.addFlashAttribute(
+                    "error",
+                    "Passenger cannot be deleted because reservations exist"
+            );
+        }
 
         return "redirect:/passengers-page";
     }
@@ -390,6 +503,82 @@ public class ViewController {
         );
 
         return "login";
+    }
+
+    private void addBookingData(Model model) {
+
+        model.addAttribute(
+                "trains",
+                trainRepository.findAll()
+        );
+
+        model.addAttribute(
+                "passengers",
+                passengerRepository.findAll()
+        );
+    }
+
+    private void validateTrain(Train train) {
+
+        if (isBlank(train.getTrainNumber())) {
+            throw new InvalidInputException(
+                    "Train number is required");
+        }
+
+        if (isBlank(train.getTrainName())) {
+            throw new InvalidInputException(
+                    "Train name is required");
+        }
+
+        if (isBlank(train.getSource())
+                || isBlank(train.getDestination())) {
+            throw new InvalidInputException(
+                    "Source and destination are required");
+        }
+
+        if (train.getDistanceKm() <= 0) {
+            throw new InvalidInputException(
+                    "Distance must be greater than zero");
+        }
+
+        if (train.getTotalSeats() <= 0) {
+            throw new InvalidInputException(
+                    "Total seats must be greater than zero");
+        }
+
+        if (train.getAvailableSeats() < 0
+                || train.getAvailableSeats() > train.getTotalSeats()) {
+            throw new InvalidInputException(
+                    "Available seats must be between zero and total seats");
+        }
+    }
+
+    private void validatePassenger(Passenger passenger) {
+
+        if (isBlank(passenger.getName())) {
+            throw new InvalidInputException(
+                    "Passenger name is required");
+        }
+
+        if (passenger.getAge() <= 0) {
+            throw new InvalidInputException(
+                    "Passenger age must be greater than zero");
+        }
+
+        if (isBlank(passenger.getGender())) {
+            throw new InvalidInputException(
+                    "Gender is required");
+        }
+
+        if (isBlank(passenger.getMobile())) {
+            throw new InvalidInputException(
+                    "Mobile number is required");
+        }
+    }
+
+    private boolean isBlank(String value) {
+
+        return value == null || value.trim().isEmpty();
     }
 
 }

@@ -46,6 +46,12 @@
             Reservation Management
         </h2>
 
+        <div
+                th:if="${error}"
+                class="alert alert-danger"
+                th:text="${error}">
+        </div>
+
         <table class="table table-bordered table-striped">
 
             <thead class="table-dark">

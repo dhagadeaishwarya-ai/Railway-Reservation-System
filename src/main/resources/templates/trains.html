@@ -41,6 +41,12 @@
             Train Management
         </h2>
 
+        <div
+                th:if="${error}"
+                class="alert alert-danger"
+                th:text="${error}">
+        </div>
+
         <form action="/save-train"
               method="post">
 

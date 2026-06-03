@@ -46,6 +46,12 @@
             Book Ticket
         </h2>
 
+        <div
+                th:if="${error}"
+                class="alert alert-danger"
+                th:text="${error}">
+        </div>
+
         <div class="card p-4">
 
             <form action="/book-ticket-ui"
